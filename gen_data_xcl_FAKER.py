@@ -17,6 +17,9 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 faker = Faker()
 
+# Global dictionary for constant values (e.g., ENTITY_PRC)
+constant_values = {}
+
 def parse_excel(path):
     df = pd.read_excel(path, header=None)
     columns = df.iloc[0].tolist()
@@ -27,7 +30,15 @@ def generate_fake_row(columns, types, date_format, start_year, end_year):
     row = []
     for col, typ in zip(columns, types):
         typ_lower = typ.lower()
-        if "date" in typ_lower:
+
+        if col.upper() == "ENTITY_PRC":
+            row.append(constant_values.get("ENTITY_PRC", "UNKNOWN"))
+        elif "timestamp" in typ_lower:
+            start_date = datetime(start_year, 1, 1)
+            end_date = datetime(end_year, 12, 31)
+            value = faker.date_time_between(start_date=start_date, end_date=end_date)
+            row.append(value.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])  # With milliseconds
+        elif "date" in typ_lower:
             start_date = datetime(start_year, 1, 1)
             end_date = datetime(end_year, 12, 31)
             value = faker.date_between(start_date=start_date, end_date=end_date)
@@ -59,49 +70,54 @@ def generate_unique_data(columns, types, count, date_format, start_year, end_yea
         attempts += 1
 
     if len(data) < count:
-        print(f"⚠️ Warning: Only generated {len(data)} unique rows out of requested {count}.")
+        print(f"\u26a0\ufe0f Warning: Only generated {len(data)} unique rows out of requested {count}.")
     return data
 
 class ExcelHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".xlsx"):
             file_path = event.src_path
-            print(f"\n📥 New Excel file detected: {file_path}")
+            print(f"\n\ud83d\udcc5 New Excel file detected: {file_path}")
             try:
                 columns, types = parse_excel(file_path)
                 print(f"Columns: {columns}")
                 print(f"Types: {types}")
 
-                num_rows = int(input("🔢 How many rows of data should be generated? "))
-                date_format = input("📆 What date format should be used? (e.g. %Y-%m-%d, %d/%m/%Y): ")
-                delimiter = input("🔣 What character should be used as a delimiter between rows? (e.g. ',' or ';' or '|'): ")
-                start_year = int(input("📅 Start year for date fields? "))
-                end_year = int(input("📅 End year for date fields? "))
+                # Prompt for constant value if ENTITY_PRC is present
+                if "ENTITY_PRC" in columns:
+                    val = input("\ud83d\udd10 Column 'ENTITY_PRC' found. What value should all rows use? ")
+                    constant_values["ENTITY_PRC"] = val
 
-                print("🗝️ Columns:")
+                num_rows = int(input("\ud83d\udd22 How many rows of data should be generated? "))
+                date_format = input("\ud83d\uddd3\ufe0f What date format should be used? (e.g. %Y-%m-%d, %d/%m/%Y): ")
+                delimiter = input("\ud83d\udd23 What character should be used as a delimiter between rows? (e.g. ',' or ';' or '|'): ")
+                start_year = int(input("\ud83d\udcc5 Start year for date/timestamp fields? "))
+                end_year = int(input("\ud83d\udcc5 End year for date/timestamp fields? "))
+
+                print("\ud83d\udd11 Columns:")
                 for idx, name in enumerate(columns):
                     print(f"{idx}: {name}")
-                pk_input = input("🔑 Enter comma-separated column numbers that form the Primary Key (e.g., 0,2): ")
+                pk_input = input("\ud83d\udd10 Enter comma-separated column numbers that form the Primary Key (e.g., 0,2): ")
                 pk_indices = [int(i.strip()) for i in pk_input.split(",") if i.strip().isdigit()]
 
-                print("🤖 Generating data...")
+                print("\ud83e\uddd1\u200d\ud83d\udcbb Generating data...")
 
                 rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices)
 
                 if not rows:
-                    print("❌ No data generated. Skipping file.")
+                    print("\u274c No data generated. Skipping file.")
                     return
 
                 df = pd.DataFrame(rows, columns=columns)
                 filename = os.path.basename(file_path).replace(".xlsx", ".txt")
                 output_path = os.path.join(OUTPUT_FOLDER, filename)
                 df.to_csv(output_path, index=False, sep=delimiter, lineterminator="\n")
-                print(f"✅ Data saved to {output_path}")
+                print(f"\u2705 Data saved to {output_path}")
             except Exception as e:
-                print(f"❌ Error processing file: {e}")
+                print(f"\u274c Error processing file: {e}")
 
 def main():
-    print(f"📂 Watching folder: {INPUT_FOLDER}")
+    print(f"\ud83d\udcc2 Watching folder: {INPUT_FOLDER}")
     observer = Observer()
     observer.schedule(ExcelHandler(), INPUT_FOLDER, recursive=False)
     observer.start()
@@ -114,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
