@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import pandas as pd
 from faker import Faker
 from watchdog.observers import Observer
@@ -23,44 +24,53 @@ def parse_excel(path):
     types = df.iloc[1].tolist()
     return columns, types
 
-def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values={}):
+def pad_or_trim(value, length):
+    value = str(value)
+    if len(value) > length:
+        return value[:length]
+    return value.ljust(length, 'X')
+
+def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_value_lists={}, fixed_lengths={}):
     row = []
     for col, typ in zip(columns, types):
-        if col in fixed_values:
-            row.append(fixed_values[col])
-            continue
-
         typ_lower = typ.lower()
-        if "timestamp" in typ_lower:
+
+        if col in fixed_value_lists:
+            value = random.choice(fixed_value_lists[col])
+        elif "timestamp" in typ_lower:
             start_date = datetime(start_year, 1, 1)
             end_date = datetime(end_year, 12, 31)
             dt = faker.date_time_between(start_date=start_date, end_date=end_date)
-            row.append(dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
+            value = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         elif "date" in typ_lower:
             start_date = datetime(start_year, 1, 1)
             end_date = datetime(end_year, 12, 31)
-            value = faker.date_between(start_date=start_date, end_date=end_date)
-            row.append(value.strftime(date_format))
+            value = faker.date_between(start_date=start_date, end_date=end_date).strftime(date_format)
         elif "int" in typ_lower or "smallint" in typ_lower or "bigint" in typ_lower:
-            row.append(faker.random_int(min=0, max=99999))
+            value = faker.random_int(min=0, max=99999)
         elif "float" in typ_lower or "decimal" in typ_lower:
-            row.append(round(faker.pyfloat(left_digits=4, right_digits=2, positive=True), 2))
+            value = round(faker.pyfloat(left_digits=4, right_digits=2, positive=True), 2)
         elif "email" in col.lower():
-            row.append(faker.email())
+            value = faker.email()
         elif "char" in typ_lower or "varchar" in typ_lower or "string" in typ_lower:
-            row.append(faker.word())
+            value = faker.word()
         else:
-            row.append(faker.word())
+            value = faker.word()
+
+        if col in fixed_lengths:
+            value = pad_or_trim(value, fixed_lengths[col])
+
+        row.append(value)
     return row
 
-def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_values={}):
+def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_value_lists={}, fixed_lengths={}):
     data = []
     seen_keys = set()
     attempts = 0
     max_attempts = count * 10
 
     while len(data) < count and attempts < max_attempts:
-        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values)
+        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_value_lists, fixed_lengths)
         key = tuple(row[i] for i in pk_indices)
         if key not in seen_keys:
             seen_keys.add(key)
@@ -78,8 +88,8 @@ class ExcelHandler(FileSystemEventHandler):
             print(f"\n📥 New Excel file detected: {file_path}")
             try:
                 columns, types = parse_excel(file_path)
-                print(f"🧾 Columns: {columns}")
-                print(f"🔢 Types: {types}")
+                print(f"Columns: {columns}")
+                print(f"Types: {types}")
 
                 num_rows = int(input("🔢 How many rows of data should be generated? "))
                 date_format = input("📆 What date format should be used? (e.g. %Y-%m-%d, %d/%m/%Y): ")
@@ -93,22 +103,35 @@ class ExcelHandler(FileSystemEventHandler):
                 pk_input = input("🔑 Enter comma-separated column numbers that form the Primary Key (e.g., 0,2): ")
                 pk_indices = [int(i.strip()) for i in pk_input.split(",") if i.strip().isdigit()]
 
-                fixed_values = {}
-                if "ENTITY_PRC" in columns:
-                    val = input("🏢 What fixed value should be used for 'ENTITY_PRC'? ")
-                    fixed_values["ENTITY_PRC"] = val
+                fixed_value_lists = {}
+                fixed_lengths = {}
+
+                for col in columns:
+                    if col.upper() == "ENTITY_PRC":
+                        val = input(f"🏢 Enter comma-separated values for '{col}' (leave blank to skip): ")
+                        if val.strip():
+                            fixed_value_lists[col] = [v.strip() for v in val.split(",") if v.strip()]
+
+                for col in columns:
+                    length_input = input(f"📏 Enter fixed length for column '{col}' (leave blank if not needed): ")
+                    if length_input.strip().isdigit():
+                        fixed_lengths[col] = int(length_input.strip())
+
+                output_name = input("📝 Enter output file name (without extension, leave blank to auto-name): ").strip()
+                if not output_name:
+                    input_base = os.path.splitext(os.path.basename(file_path))[0]
+                    output_name = f"{input_base}_out"
 
                 print("🤖 Generating data...")
 
-                rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_values)
+                rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_value_lists, fixed_lengths)
 
                 if not rows:
                     print("❌ No data generated. Skipping file.")
                     return
 
                 df = pd.DataFrame(rows, columns=columns)
-                filename = os.path.basename(file_path).replace(".xlsx", ".txt")
-                output_path = os.path.join(OUTPUT_FOLDER, filename)
+                output_path = os.path.join(OUTPUT_FOLDER, f"{output_name}.txt")
                 df.to_csv(output_path, index=False, sep=delimiter, lineterminator="\n")
                 print(f"✅ Data saved to {output_path}")
             except Exception as e:
