@@ -1,0 +1,173 @@
+import os
+import time
+import pandas as pd
+from faker import Faker
+from datetime import datetime
+from ftplib import FTP
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+faker = Faker()
+
+INPUT_FOLDER = "./excel_drop"
+OUTPUT_FOLDER = "./output_text"
+FTP_HOST = "your.ftp.server.com"
+FTP_USER = "your_username"
+FTP_PASS = "your_password"
+FTP_BASE_DIR = "/upload/"
+
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+def parse_excel(path):
+    df = pd.read_excel(path, header=None)
+    if df.shape[0] >= 2 and df.shape[1] > 2:
+        columns = df.iloc[0].tolist()
+        types = df.iloc[1].tolist()
+    elif df.shape[1] == 2:
+        columns = df.iloc[:, 0].tolist()
+        types = df.iloc[:, 1].tolist()
+    else:
+        raise ValueError("Unrecognized Excel format")
+    return columns, types
+
+def get_column_length_preferences(columns, types):
+    lengths = {}
+    for col, typ in zip(columns, types):
+        if any(x in typ.lower() for x in ['date', 'timestamp']):
+            continue
+        length = input(f"📏 Enter a fixed length for column '{col}' (press Enter to skip): ")
+        if length.isdigit():
+            lengths[col] = int(length)
+    return lengths
+
+def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values, col_lengths):
+    row = []
+    for col, typ in zip(columns, types):
+        if col.upper() == "ENTITY_PRC" and fixed_values.get(col):
+            value = faker.random_element(fixed_values[col])
+        else:
+            typ_lower = typ.lower()
+            if "date" in typ_lower:
+                value = faker.date_between_dates(
+                    date_start=datetime(start_year, 1, 1),
+                    date_end=datetime(end_year, 12, 31)
+                ).strftime(date_format)
+            elif "timestamp" in typ_lower:
+                value = faker.date_time_between(
+                    start_date=datetime(start_year, 1, 1),
+                    end_date=datetime(end_year, 12, 31)
+                ).strftime(f"{date_format} %H:%M:%S.%f")[:-3]
+            elif "int" in typ_lower:
+                value = faker.random_int(min=0, max=99_999)
+            elif "float" in typ_lower or "decimal" in typ_lower:
+                value = round(faker.pyfloat(left_digits=5, right_digits=2, positive=True), 2)
+            elif "email" in col.lower():
+                value = faker.email()
+            elif "name" in col.lower():
+                value = faker.name()
+            elif "age" in col.lower():
+                value = faker.random_int(min=0, max=99)
+            elif "account" in col.lower():
+                value = faker.bban()
+            else:
+                value = faker.word()
+        if col in col_lengths:
+            value = str(value)[:col_lengths[col]].ljust(col_lengths[col])
+        row.append(value)
+    return row
+
+def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_values, col_lengths):
+    data = []
+    seen_keys = set()
+    attempts = 0
+    max_attempts = count * 10
+    while len(data) < count and attempts < max_attempts:
+        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values, col_lengths)
+        key = tuple(row[i] for i in pk_indices)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            data.append(row)
+        attempts += 1
+    return data
+
+def upload_via_ftp(local_path, remote_name, subfolder=None):
+    with FTP(FTP_HOST) as ftp:
+        ftp.login(FTP_USER, FTP_PASS)
+        if subfolder:
+            try:
+                ftp.cwd(os.path.join(FTP_BASE_DIR, subfolder))
+            except:
+                ftp.mkd(os.path.join(FTP_BASE_DIR, subfolder))
+                ftp.cwd(os.path.join(FTP_BASE_DIR, subfolder))
+        else:
+            ftp.cwd(FTP_BASE_DIR)
+        with open(local_path, "rb") as f:
+            ftp.storbinary(f"STOR {remote_name}", f)
+
+class ExcelHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.endswith(".xlsx"):
+            file_path = event.src_path
+            print(f"\n📥 New Excel file detected: {file_path}")
+            try:
+                columns, types = parse_excel(file_path)
+
+                print("📋 Columns and Types:")
+                for i, (c, t) in enumerate(zip(columns, types)):
+                    print(f"{i}: {c} ({t})")
+
+                num_rows = int(input("🔢 Number of rows to generate: "))
+                date_format = input("📆 Date format (e.g. %Y-%m-%d): ")
+                delimiter = input("🔣 Delimiter for output (e.g. ',', ';', '|'): ")
+                start_year = int(input("🗓️ Start year for dates: "))
+                end_year = int(input("🗓️ End year for dates: "))
+
+                pk_input = input("🗝️ Enter primary key column numbers (comma-separated): ")
+                pk_indices = [int(x.strip()) for x in pk_input.split(",") if x.strip().isdigit()]
+
+                fixed_values = {}
+                if "ENTITY_PRC" in [c.upper() for c in columns]:
+                    entity_input = input("🏷️ Enter values for ENTITY_PRC (comma-separated): ")
+                    fixed_values["ENTITY_PRC"] = [v.strip() for v in entity_input.split(",") if v.strip()]
+
+                col_lengths = get_column_length_preferences(columns, types)
+
+                rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_values, col_lengths)
+                if not rows:
+                    print("❌ Failed to generate data.")
+                    return
+
+                df = pd.DataFrame(rows, columns=columns)
+
+                output_name = input("💾 Enter output filename (without extension, press Enter to auto-name): ")
+                if not output_name:
+                    output_name = os.path.splitext(os.path.basename(file_path))[0] + "_out"
+                output_path = os.path.join(OUTPUT_FOLDER, output_name + ".txt")
+
+                df.to_csv(output_path, index=False, sep=delimiter, line_terminator="\n")
+                print(f"✅ File saved to {output_path}")
+
+                if input("📤 Upload file via FTP? (y/n): ").lower() == "y":
+                    subfolder = None
+                    if input("📁 Upload to specific subfolder? (y/n): ").lower() == "y":
+                        subfolder = input("📝 Enter subfolder name: ")
+                    upload_via_ftp(output_path, os.path.basename(output_path), subfolder)
+                    print("📦 File uploaded via FTP.")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+
+def main():
+    print(f"📂 Watching folder: {INPUT_FOLDER}")
+    observer = Observer()
+    observer.schedule(ExcelHandler(), INPUT_FOLDER, recursive=False)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+if __name__ == "__main__":
+    main()
