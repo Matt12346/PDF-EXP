@@ -47,9 +47,8 @@ def parse_excel(path):
     return columns, types
 
 def ask_special_characters(columns):
-    add_special_chars = input("Would you like to add special characters to the data? (yes/no): ").strip().lower()
-
-    if add_special_chars == 'yes':
+    add_special_chars = input("Would you like to add special characters to the data? (y/n): ").strip().lower()
+    if add_special_chars == 'y':
         print("Which columns should have special characters added?")
         print("Available columns:")
         for idx, col in enumerate(columns):
@@ -64,6 +63,28 @@ def ask_special_characters(columns):
         logging.info("No special characters will be added.")
         return []
 
+def ask_fixed_length(columns):
+    # Ask the user to input fixed lengths for multiple columns
+    fixed_lengths_input = input("Enter columns and fixed lengths in the format <column_index>:<length>,<column_index>:<length>,... : ").strip()
+    
+    fixed_lengths = {}
+    if fixed_lengths_input:
+        for item in fixed_lengths_input.split(","):
+            try:
+                col_idx, length = item.split(":")
+                col_idx = int(col_idx.strip())
+                length = int(length.strip())
+                fixed_lengths[columns[col_idx]] = length
+            except ValueError:
+                logging.error(f"Invalid format: {item}. Expected <column_index>:<length> format.")
+    
+    logging.info(f"Fixed lengths set: {fixed_lengths}")
+    return fixed_lengths
+
+def ask_include_headers():
+    include_header = input("Should the first row with column names be included in the output file? (y/n): ").strip().lower()
+    return include_header == 'y'
+
 def get_random_word(length):
     """Generate a random meaningful word with at least the given length."""
     word = faker.word()
@@ -77,7 +98,7 @@ def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_l
         typ_lower = typ.lower()
         col_lower = col.lower()
 
-        special_char = '@'  # Special character to add
+        special_char = '%'  # Default special character to add
         value = None
         
         if col_lower == "entity_prc" and entity_values:
@@ -111,18 +132,20 @@ def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_l
         
         else:
             value = faker.word()
-        
-        # Add special character to the value if the column is in the list of special columns
-        if idx in special_cols:
-            value = str(value) + special_char  # Add special character to the value
 
         # Apply fixed length if specified and not a date/timestamp
-        if col not in fixed_lengths or ("date" in typ_lower or "timestamp" in typ_lower):
-            row.append(str(value))  # No padding with underscores unless explicitly required
-        else:
-            value_str = get_random_word(fixed_lengths[col])  # Generate a random meaningful word of the required length
-            row.append(value_str)
+        if col in fixed_lengths and "date" not in typ_lower and "timestamp" not in typ_lower:
+            target_len = fixed_lengths[col]
+            if idx in special_cols:
+                core_len = max(target_len - 1, 0)  # Reserve space for special char
+                value = get_random_word(core_len) + special_char
+            else:
+                value = get_random_word(target_len)
+        elif idx in special_cols:
+            value = f"{value}{special_char}"
 
+        row.append(str(value))  # Add value to row
+    
     return row
 
 def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_values, special_cols):
@@ -182,17 +205,13 @@ class ExcelHandler(FileSystemEventHandler):
                     raw_values = input("Enter possible values for ENTITY_PRC (comma-separated): ")
                     entity_values = [v.strip() for v in raw_values.split(",") if v.strip()]
 
-                fixed_lengths = {}
-                for col, typ in zip(columns, types):
-                    if "date" not in typ.lower() and "timestamp" not in typ.lower():
-                        ask = input(f"Fixed length for column '{col}'? (Enter for none): ")
-                        if ask.isdigit():
-                            fixed_lengths[col] = int(ask)
+                fixed_lengths = ask_fixed_length(columns)
 
                 special_cols = ask_special_characters(columns)
 
-                subfolder = input("Should the output be uploaded to an FTP subfolder? (Enter subfolder name or leave blank): ")
+                include_header = ask_include_headers()
 
+                subfolder = input("Should the output be uploaded to an FTP subfolder? (y/n): ").strip().lower()
                 output_filename = input("Output filename (Enter to auto-generate): ")
                 if not output_filename:
                     output_filename = os.path.basename(file_path).replace(".xlsx", "_out.txt")
@@ -200,7 +219,10 @@ class ExcelHandler(FileSystemEventHandler):
                 logging.info(f"Generating data and saving to {output_filename}")
                 rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_values, special_cols)
                 output_path = os.path.join(OUTPUT_FOLDER, output_filename)
-                pd.DataFrame(rows, columns=columns).to_csv(output_path, index=False, sep=delimiter, lineterminator="\n")
+                df = pd.DataFrame(rows, columns=columns)
+
+                # Save the dataframe with or without headers based on user choice
+                df.to_csv(output_path, index=False, sep=delimiter, lineterminator="\n", header=include_header)
 
                 logging.info(f"Output saved at: {output_path}")
                 print(f"Output saved at: {output_path}")
