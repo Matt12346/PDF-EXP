@@ -6,16 +6,12 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 from dotenv import load_dotenv
-import ftplib
 
 load_dotenv()
 
-INPUT_FOLDER = "./excel_drop"
-OUTPUT_FOLDER = "./output_text"
-FTP_HOST = os.getenv("FTP_HOST")
-FTP_USER = os.getenv("FTP_USER")
-FTP_PASS = os.getenv("FTP_PASS")
-FTP_DIR = os.getenv("FTP_DIR", "/")
+# 🔧 Update with your absolute paths
+INPUT_FOLDER = r"C:\Users\Matteo\Desktop\excel_drop"
+OUTPUT_FOLDER = r"C:\Users\Matteo\Desktop\output_text"
 
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -24,59 +20,71 @@ faker = Faker()
 
 def parse_excel(path):
     df = pd.read_excel(path, header=None)
-    if df.shape[0] >= 2 and df.shape[1] >= 2:
-        if df.shape[0] == 2:
-            # Two rows, multiple columns
-            columns = df.iloc[0].tolist()
-            types = df.iloc[1].tolist()
-        else:
-            # Two columns, multiple rows
-            columns = df.iloc[:, 0].dropna().tolist()
-            types = df.iloc[:, 1].dropna().tolist()
-        return columns, types
+    if df.shape[0] >= 2 and df.shape[1] == 1:
+        # Column format
+        columns = df.iloc[:, 0].dropna().tolist()
+        types = df.iloc[:, 1].dropna().tolist()
     else:
-        raise ValueError("Invalid Excel structure. Expected either 2 rows or 2 columns with data.")
+        # Row format
+        columns = df.iloc[0].tolist()
+        types = df.iloc[1].tolist()
+    return columns, types
 
-def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values, fixed_lengths):
+def prompt_fixed_lengths(columns, types):
+    lengths = {}
+    for col, typ in zip(columns, types):
+        if 'date' in typ.lower() or 'timestamp' in typ.lower():
+            continue
+        length = input(f"Enter fixed length for column '{col}' of type {typ} (press Enter to skip): ").strip()
+        lengths[col] = int(length) if length.isdigit() else None
+    return lengths
+
+def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_lengths, entity_prc_values):
     row = []
     for col, typ in zip(columns, types):
-        typ_lower = str(typ).lower()
-        length = fixed_lengths.get(col)
+        typ_lower = typ.lower()
+        fixed_len = fixed_lengths.get(col)
 
-        if col in fixed_values:
-            value = faker.random_element(fixed_values[col])
+        if col.lower() == 'entity_prc' and entity_prc_values:
+            value = faker.random_element(elements=entity_prc_values)
         elif "date" in typ_lower or "timestamp" in typ_lower:
             start_date = datetime(start_year, 1, 1)
             end_date = datetime(end_year, 12, 31)
-            value = faker.date_time_between(start_date=start_date, end_date=end_date)
-            value = value.strftime(date_format)
-        elif "int" in typ_lower or "smallint" in typ_lower or "bigint" in typ_lower:
-            value = faker.random_int(min=0, max=99999)
+            date_obj = faker.date_time_between(start_date=start_date, end_date=end_date)
+            value = date_obj.strftime(date_format)
+        elif "int" in typ_lower:
+            value = str(faker.random_int(min=0, max=99999))
         elif "float" in typ_lower or "decimal" in typ_lower:
-            value = round(faker.pyfloat(left_digits=4, right_digits=2, positive=True), 2)
+            value = f"{round(faker.pyfloat(left_digits=4, right_digits=2, positive=True), 2)}"
         elif "email" in col.lower():
             value = faker.email()
         elif "name" in col.lower():
             value = faker.name()
+        elif "surname" in col.lower():
+            value = faker.last_name()
+        elif "firstname" in col.lower():
+            value = faker.first_name()
+        elif "lastname" in col.lower():
+            value = faker.last_name()
         elif "age" in col.lower():
-            value = faker.random_int(min=0, max=100)
+            value = str(faker.random_int(min=0, max=100))
         else:
             value = faker.word()
 
-        if length and isinstance(value, str):
-            value = value[:length].ljust(length, 'x')
+        if fixed_len:
+            value = str(value)[:fixed_len].ljust(fixed_len)
 
         row.append(value)
     return row
 
-def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_values, fixed_lengths):
+def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_prc_values):
     data = []
     seen_keys = set()
     attempts = 0
     max_attempts = count * 10
 
     while len(data) < count and attempts < max_attempts:
-        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_values, fixed_lengths)
+        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_lengths, entity_prc_values)
         key = tuple(row[i] for i in pk_indices)
         if key not in seen_keys:
             seen_keys.add(key)
@@ -87,31 +95,18 @@ def generate_unique_data(columns, types, count, date_format, start_year, end_yea
         print(f"⚠️ Warning: Only generated {len(data)} unique rows out of requested {count}.")
     return data
 
-def upload_via_ftp(local_path, remote_dir, filename):
-    with ftplib.FTP(FTP_HOST, FTP_USER, FTP_PASS) as ftp:
-        ftp.cwd(FTP_DIR)
-        if remote_dir:
-            try:
-                ftp.mkd(remote_dir)
-            except:
-                pass  # already exists
-            ftp.cwd(remote_dir)
-        with open(local_path, 'rb') as f:
-            ftp.storbinary(f'STOR {filename}', f)
-        print("📡 File uploaded via FTP.")
-
 class ExcelHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        print(f"📦 Detected a new file system event: {event.src_path}")
+    def on_any_event(self, event):
+        print(f"📡 Detected event: {event.event_type} - {event.src_path}")
 
+    def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".xlsx"):
-            print("📄 Valid Excel file detected.")
             file_path = event.src_path
-            print(f"\n📥 Processing Excel file: {file_path}")
+            print(f"\n📥 New Excel file detected: {file_path}")
             try:
                 columns, types = parse_excel(file_path)
-                print(f"🧩 Columns: {columns}")
-                print(f"📐 Types: {types}")
+                print(f"Columns: {columns}")
+                print(f"Types: {types}")
 
                 num_rows = int(input("🔢 How many rows of data should be generated? "))
                 date_format = input("📆 What date format should be used? (e.g. %Y-%m-%d, %d/%m/%Y): ")
@@ -125,47 +120,36 @@ class ExcelHandler(FileSystemEventHandler):
                 pk_input = input("🔑 Enter comma-separated column numbers that form the Primary Key (e.g., 0,2): ")
                 pk_indices = [int(i.strip()) for i in pk_input.split(",") if i.strip().isdigit()]
 
-                fixed_values = {}
-                for col in columns:
-                    if col.strip().lower() == "entity_prc":
-                        vals = input(f"🏷️ Enter comma-separated values to use for {col}: ").split(',')
-                        fixed_values[col] = [v.strip() for v in vals if v.strip()]
+                entity_prc_values = []
+                if 'ENTITY_PRC' in [c.upper() for c in columns]:
+                    inp = input("🎯 Enter values for ENTITY_PRC, comma-separated (leave empty to skip): ").strip()
+                    if inp:
+                        entity_prc_values = [val.strip() for val in inp.split(",")]
 
-                fixed_lengths = {}
-                for col, typ in zip(columns, types):
-                    if "date" not in typ.lower() and "timestamp" not in typ.lower():
-                        length = input(f"🔠 Enter fixed length for column '{col}' (or press Enter to skip): ").strip()
-                        if length.isdigit():
-                            fixed_lengths[col] = int(length)
-
-                out_name = input("💾 Enter output file name (or press Enter to use input filename + '_out'): ").strip()
-                if not out_name:
-                    out_name = os.path.basename(file_path).replace(".xlsx", "_out.txt")
-                if not out_name.endswith(".txt"):
-                    out_name += ".txt"
+                fixed_lengths = prompt_fixed_lengths(columns, types)
 
                 print("🤖 Generating data...")
-                rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_values, fixed_lengths)
+
+                rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_prc_values)
+
                 if not rows:
                     print("❌ No data generated. Skipping file.")
                     return
 
                 df = pd.DataFrame(rows, columns=columns)
-                output_path = os.path.join(OUTPUT_FOLDER, out_name)
-                df.to_csv(output_path, index=False, sep=delimiter, lineterminator="\n")
+                suggested_name = os.path.basename(file_path).replace(".xlsx", "_out.txt")
+                filename = input(f"💾 Output file name (press Enter to use default: {suggested_name}): ").strip()
+                if not filename:
+                    filename = suggested_name
+
+                output_path = os.path.join(OUTPUT_FOLDER, filename)
+                df.to_csv(output_path, index=False, sep=delimiter, line_terminator="\n")
                 print(f"✅ Data saved to {output_path}")
-
-                if input("🚀 Transfer this file via FTP? (y/n): ").lower().strip() == 'y':
-                    subfolder = input("📁 Enter subfolder on FTP (leave blank to skip): ").strip()
-                    upload_via_ftp(output_path, subfolder, out_name)
-
             except Exception as e:
                 print(f"❌ Error processing file: {e}")
-        else:
-            print("❗ Ignored event: not a valid Excel file (.xlsx)")
 
 def main():
-    print(f"📂 Watching folder: {os.path.abspath(INPUT_FOLDER)}")
+    print(f"📂 Watching folder: {INPUT_FOLDER}")
     observer = Observer()
     observer.schedule(ExcelHandler(), INPUT_FOLDER, recursive=False)
     observer.start()
