@@ -118,6 +118,7 @@ def upload_via_ftp(local_path, remote_path):
 
 class ExcelHandler(FileSystemEventHandler):
     def on_created(self, event):
+            print(f"⚠ Detected file system event: {event.src_path}")
         if not event.is_directory and event.src_path.endswith(".xlsx"):
             file_path = event.src_path
             print(f"\n📥 New Excel file detected: {file_path}")
