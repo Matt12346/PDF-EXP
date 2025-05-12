@@ -1,0 +1,236 @@
+import os
+import time
+import pandas as pd
+from faker import Faker
+from datetime import datetime
+from dotenv import load_dotenv
+from ftplib import FTP
+import logging
+import random
+
+# Hardcode the log file path
+LOG_FILE = "./process_log.txt"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
+
+load_dotenv()
+
+INPUT_FOLDER = "./excel_drop"
+OUTPUT_FOLDER = "./output_text"
+FTP_HOST = os.getenv("FTP_HOST")
+FTP_USER = os.getenv("FTP_USER")
+FTP_PASS = os.getenv("FTP_PASS")
+FTP_ROOT_DIR = os.getenv("FTP_ROOT_DIR", "/")
+
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+faker = Faker()
+
+def list_files_in_directory():
+    """List all files in the current directory."""
+    files = [f for f in os.listdir(INPUT_FOLDER) if os.path.isfile(os.path.join(INPUT_FOLDER, f))]
+    return files
+
+def get_file_from_user(files):
+    """Prompt the user to choose a file from the available files."""
+    print("Available files:")
+    for idx, file in enumerate(files):
+        print(f"{idx + 1}. {file}")
+    
+    while True:
+        try:
+            file_choice = int(input(f"Choose the file number (1-{len(files)}): "))
+            if 1 <= file_choice <= len(files):
+                return files[file_choice - 1]
+            else:
+                print("Invalid choice. Try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+def wait_for_file_ready(path, timeout=10):
+    """Wait until a file is readable, to avoid issues with partial writes (e.g. drag-and-drop)."""
+    for _ in range(timeout):
+        try:
+            with open(path, 'rb'):
+                return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def parse_excel(path):
+    logging.info(f"Parsing Excel file: {path}")
+    df = pd.read_excel(path, header=None)
+    if df.shape[0] == 2:
+        columns = df.iloc[0].tolist()
+        types = df.iloc[1].tolist()
+    elif df.shape[1] == 2:
+        columns = df.iloc[:, 0].tolist()
+        types = df.iloc[:, 1].tolist()
+    else:
+        raise ValueError("Excel format not recognized. Expected either 2 rows or 2 columns.")
+    logging.info(f"Parsed columns: {columns}")
+    return columns, types
+
+def ask_special_characters(columns):
+    add_special_chars = input("Would you like to add special characters to the data? (y/n): ").strip().lower()
+    if add_special_chars == 'y':
+        print("Which columns should have special characters added?")
+        for idx, col in enumerate(columns):
+            print(f"{idx}: {col}")
+        special_cols_input = input("Enter column indices (comma separated): ")
+        special_cols = [int(i.strip()) for i in special_cols_input.split(",") if i.strip().isdigit()]
+        logging.info(f"Special characters will be added to columns: {special_cols}")
+        return special_cols
+    else:
+        logging.info("No special characters will be added.")
+        return []
+
+def ask_fixed_length(columns):
+    fixed_lengths_input = input("Enter columns and fixed lengths in the format <column_index>:<length>,... : ").strip()
+    fixed_lengths = {}
+    if fixed_lengths_input:
+        for item in fixed_lengths_input.split(","):
+            try:
+                col_idx, length = item.split(":")
+                col_idx = int(col_idx.strip())
+                length = int(length.strip())
+                fixed_lengths[columns[col_idx]] = length
+            except ValueError:
+                logging.error(f"Invalid format: {item}")
+    logging.info(f"Fixed lengths set: {fixed_lengths}")
+    return fixed_lengths
+
+def ask_include_headers():
+    include_header = input("Include column headers in output? (y/n): ").strip().lower()
+    return include_header == 'y'
+
+def get_random_word(length):
+    word = faker.word()
+    while len(word) < length:
+        word += faker.word()
+    return word[:length]
+
+def generate_fake_row(columns, types, date_format, start_year, end_year, fixed_lengths, entity_values, special_cols):
+    row = []
+    for idx, (col, typ) in enumerate(zip(columns, types)):
+        typ_lower = typ.lower()
+        col_lower = col.lower()
+        special_char = '%'
+        value = None
+
+        if col_lower == "entity_prc" and entity_values:
+            value = faker.random_element(entity_values)
+        elif "date" in typ_lower and "timestamp" not in typ_lower:
+            start_date = datetime(start_year, 1, 1)
+            end_date = datetime(end_year, 12, 31)
+            value = faker.date_between(start_date, end_date).strftime(date_format)
+        elif "timestamp" in typ_lower:
+            start_dt = datetime(start_year, 1, 1)
+            end_dt = datetime(end_year, 12, 31, 23, 59, 59)
+            value = faker.date_time_between(start_dt, end_dt).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elif "int" in typ_lower:
+            value = faker.random_int(min=0, max=99999)
+        elif "float" in typ_lower or "decimal" in typ_lower:
+            value = round(faker.pyfloat(left_digits=4, right_digits=2, positive=True), 2)
+        elif "name" in col_lower:
+            value = faker.name()
+        elif "age" in col_lower:
+            value = faker.random_int(min=18, max=99)
+        elif "email" in col_lower:
+            value = faker.email()
+        else:
+            value = faker.word()
+
+        if col in fixed_lengths and "date" not in typ_lower and "timestamp" not in typ_lower:
+            target_len = fixed_lengths[col]
+            if idx in special_cols:
+                value = get_random_word(max(target_len - 1, 0)) + special_char
+            else:
+                value = get_random_word(target_len)
+        elif idx in special_cols:
+            value = f"{value}{special_char}"
+
+        row.append(str(value))
+    return row
+
+def generate_unique_data(columns, types, count, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_values, special_cols):
+    data, seen_keys = [], set()
+    attempts, max_attempts = 0, count * 10
+    while len(data) < count and attempts < max_attempts:
+        row = generate_fake_row(columns, types, date_format, start_year, end_year, fixed_lengths, entity_values, special_cols)
+        key = tuple(row[i] for i in pk_indices)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            data.append(row)
+        attempts += 1
+    logging.info(f"Generated {len(data)} unique rows of data.")
+    return data
+
+def upload_via_ftp(local_path, remote_subfolder):
+    with FTP(FTP_HOST) as ftp:
+        ftp.login(FTP_USER, FTP_PASS)
+        ftp.cwd(FTP_ROOT_DIR)
+        if remote_subfolder and remote_subfolder not in ftp.nlst():
+            ftp.mkd(remote_subfolder)
+        ftp.cwd(remote_subfolder or FTP_ROOT_DIR)
+        with open(local_path, "rb") as f:
+            ftp.storbinary(f"STOR {os.path.basename(local_path)}", f)
+        logging.info(f"Uploaded file {os.path.basename(local_path)} to FTP.")
+
+def process_excel_file(file_path):
+    try:
+        logging.info(f"Processing file: {file_path}")
+        columns, types = parse_excel(file_path)
+
+        num_rows = int(input("How many rows of data should be generated? "))
+        date_format = input("Date format (e.g. %Y-%m-%d): ")
+        delimiter = input("Delimiter between values (e.g. ',' or '|'): ")
+        start_year = int(input("Start year for dates? "))
+        end_year = int(input("End year for dates? "))
+
+        print("Available columns:")
+        for idx, col in enumerate(columns):
+            print(f"{idx}: {col}")
+        pk_indices = [int(i.strip()) for i in input("Primary key column indices (comma separated): ").split(",") if i.strip().isdigit()]
+
+        entity_values = []
+        if "entity_prc" in [col.lower() for col in columns]:
+            raw_values = input("Enter possible values for ENTITY_PRC (comma-separated): ")
+            entity_values = [v.strip() for v in raw_values.split(",") if v.strip()]
+
+        fixed_lengths = ask_fixed_length(columns)
+        special_cols = ask_special_characters(columns)
+        include_header = ask_include_headers()
+
+        subfolder = input("Upload to FTP subfolder? (y/n): ").strip().lower()
+        output_filename = input("Output filename (Enter to auto-generate): ")
+        if not output_filename:
+            output_filename = os.path.basename(file_path).replace(".xlsx", "_out.txt")
+
+        rows = generate_unique_data(columns, types, num_rows, date_format, start_year, end_year, pk_indices, fixed_lengths, entity_values, special_cols)
+        output_path = os.path.join(OUTPUT_FOLDER, output_filename)
+        pd.DataFrame(rows, columns=columns).to_csv(output_path, index=False, sep=delimiter, lineterminator="\n", header=include_header)
+
+        logging.info(f"Output saved at: {output_path}")
+        print(f"Output saved at: {output_path}")
+
+    except Exception as e:
+        logging.error(f"Error processing file: {e}", exc_info=True)
+        print(f"Error processing file: {e}")
+
+def main():
+    files = list_files_in_directory()
+    if not files:
+        print("No files found in the current directory.")
+        return
+    
+    selected_file = get_file_from_user(files)
+    file_path = os.path.join(INPUT_FOLDER, selected_file)
+    process_excel_file(file_path)
+
+if __name__ == "__main__":
+    main()
