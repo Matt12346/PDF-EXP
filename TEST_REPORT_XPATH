@@ -1,0 +1,23 @@
+from lxml import html
+
+# Sample HTML content (replace with actual HTML)
+html_content = """
+<html>
+  <body>
+    <div>
+      <p>Test Report</p>
+      <span>Another Element</span>
+    </div>
+  </body>
+</html>
+"""
+
+tree = html.fromstring(html_content)
+
+# Find the first element containing the text "Test Report"
+element = tree.xpath("//*[contains(text(), 'Test Report')]")[0]
+
+# Get the XPath of the element
+xpath = tree.getpath(element)
+
+print("XPath:", xpath)
